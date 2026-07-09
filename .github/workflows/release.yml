@@ -88,7 +88,26 @@ jobs:
       - name: Vulnerability scan (govulncheck, binary mode — blocking, gates the image)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          "$(go env GOPATH)/bin/govulncheck" -mode=binary _build/managed-otelcol
+          # Accepted (no-fix, assessed-not-exploitable) — justify each, review on every bump:
+          #   GO-2022-0635 / GO-2022-0646 — AWS S3 Crypto SDK client-side encryption (aws-sdk-go v1
+          #   s3crypto). Pulled in transitively by AWS components but the collector never invokes S3
+          #   client-side encryption; "Fixed in: N/A" (AWS deprecated the client instead of patching v1).
+          #   Binary mode flags the LINKED symbol, not an actual call path. Surgical allow — any other
+          #   finding (incl. a fixable one) still fails the gate.
+          ALLOW="GO-2022-0635 GO-2022-0646"
+          set +e
+          OUT="$("$(go env GOPATH)/bin/govulncheck" -mode=binary _build/managed-otelcol 2>&1)"; rc=$?
+          set -e
+          printf '%s\n' "$OUT"
+          if [ "$rc" -eq 0 ]; then echo "govulncheck: clean"; exit 0; fi
+          # govulncheck exits 3 when vulnerabilities are found; any OTHER non-zero is a tool/error, fail hard.
+          if [ "$rc" -ne 3 ]; then echo "::error::govulncheck errored (exit $rc), not a vuln result"; exit 1; fi
+          BAD=""
+          for id in $(printf '%s\n' "$OUT" | grep -oE 'GO-[0-9]{4}-[0-9]+' | sort -u); do
+            case " $ALLOW " in *" $id "*) : ;; *) BAD="$BAD $id" ;; esac
+          done
+          if [ -n "$BAD" ]; then echo "::error::non-allowlisted vulnerabilities:$BAD"; exit 1; fi
+          echo "govulncheck: only allowlisted (accepted, no-fix) findings present — OK"
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
