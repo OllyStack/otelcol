@@ -88,13 +88,14 @@ jobs:
       - name: Vulnerability scan (govulncheck, binary mode — blocking, gates the image)
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          # Accepted (no-fix, assessed-not-exploitable) — justify each, review on every bump:
-          #   GO-2022-0635 / GO-2022-0646 — AWS S3 Crypto SDK client-side encryption (aws-sdk-go v1
-          #   s3crypto). Pulled in transitively by AWS components but the collector never invokes S3
-          #   client-side encryption; "Fixed in: N/A" (AWS deprecated the client instead of patching v1).
-          #   Binary mode flags the LINKED symbol, not an actual call path. Surgical allow — any other
-          #   finding (incl. a fixable one) still fails the gate.
-          ALLOW="GO-2022-0635 GO-2022-0646"
+          # Accepted (no-fix, assessed-not-exploitable) — all deprecated/unsafe-by-design crypto
+          # packages linked transitively, NOT on the collector's telemetry path; "Fixed in: N/A".
+          # Binary mode flags the LINKED symbol, not an actual call path. Review each on every bump;
+          # any OTHER finding (incl. a fixable one) still fails the gate.
+          #   GO-2022-0635 / GO-2022-0646 — aws-sdk-go v1 s3crypto (S3 client-side encryption; AWS
+          #                                 deprecated the client instead of patching v1).
+          #   GO-2026-5932              — golang.org/x/crypto/openpgp (upstream-deprecated, unmaintained).
+          ALLOW="GO-2022-0635 GO-2022-0646 GO-2026-5932"
           set +e
           OUT="$("$(go env GOPATH)/bin/govulncheck" -mode=binary _build/managed-otelcol 2>&1)"; rc=$?
           set -e
