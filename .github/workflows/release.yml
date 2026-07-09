@@ -1,0 +1,150 @@
+# Build + publish the OllyStack managed collector image — the curated OCB distribution (only the
+# components the portal offers, not all of contrib): the opt-in HARDENED tier, smaller attack surface.
+#
+# This repo is the PUBLIC build home, so the workflow pushes to ghcr.io/ollystack/otelcol with
+# its OWN GITHUB_TOKEN (same org — no cross-org PAT) and runs on free public-repo Actions minutes.
+# The manifest (manifest.yaml + versions/<ver>/manifest.yaml) is vendored from the private catalog on
+# each collector bump; it's just upstream OTel gomod paths (no secrets).
+#
+# Per-version: the OCB manifest is version-locked, so `version` (re)builds a snapshotted version from
+# versions/<ver>/manifest.yaml; empty builds the current root manifest.yaml.
+#
+# Hardening: pinned actions, least-privilege token, hardened runner, a BLOCKING govulncheck on the
+# built binary, and a signed (cosign) + attested (SLSA) + SBOM'd multi-arch image.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional: a snapshotted version to (re)build (e.g. 0.154.0). Empty = current manifest.yaml."
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "manifest.yaml"
+      - "versions/**"
+      - "Dockerfile"
+      - ".github/workflows/release.yml"
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/ollystack/otelcol
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write       # push the image to ghcr.io/ollystack (same org, via GITHUB_TOKEN)
+      id-token: write       # keyless cosign + SLSA provenance (Sigstore OIDC)
+      attestations: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.5"   # filterprocessor linker bug (needs 1.26+) + GO-2026-5856
+          check-latest: true
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Resolve the manifest + version
+        id: v
+        run: |
+          VIN="${{ github.event.inputs.version }}"
+          if [ -n "$VIN" ]; then
+            SNAP="versions/${VIN}/manifest.yaml"
+            if [ ! -f "$SNAP" ]; then
+              echo "::error::no manifest snapshot for ${VIN} ($SNAP). Vendor it (versions/${VIN}/manifest.yaml) from the private repo first."
+              exit 1
+            fi
+            cp "$SNAP" manifest.yaml
+            echo "building snapshotted version ${VIN}"
+          fi
+          VER="$(grep -m1 'otelcol_version:' manifest.yaml | awk '{print $2}' | tr -d '\"')"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "managed-otelcol v${VER}"
+
+      - name: No floating gomod versions
+        run: |
+          if grep -Eq 'gomod:.*(latest|master|main)$' manifest.yaml; then
+            echo "::error::floating gomod version in manifest.yaml"; exit 1
+          fi
+
+      - name: Build the managed collector (OCB) — the govulncheck subject
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          VER="${{ steps.v.outputs.version }}"
+          go install "go.opentelemetry.io/collector/cmd/builder@v${VER}"
+          "$(go env GOPATH)/bin/builder" --config manifest.yaml
+          test -x _build/managed-otelcol
+
+      - name: Vulnerability scan (govulncheck, binary mode — blocking, gates the image)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" -mode=binary _build/managed-otelcol
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}   # same-org packages:write — no PAT
+
+      - name: Build + push the image (linux/amd64, arm64)
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            OTELCOL_VERSION=${{ steps.v.outputs.version }}
+          tags: ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+          provenance: false   # attached explicitly below
+
+      - name: SLSA build-provenance for the image
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+      - name: Keyless-sign the image (Sigstore)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: SBOM (SPDX) for the image
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+          format: spdx-json
+          output-file: managed-otelcol-${{ steps.v.outputs.version }}.sbom.spdx.json
+          upload-artifact: true
+
+      - name: Record — version + digest for the private repo's `managed` distro
+        run: |
+          VER="${{ steps.v.outputs.version }}"; D="${{ steps.build.outputs.digest }}"
+          {
+            echo "## Published \`${IMAGE}:${VER}\`"
+            echo ""
+            echo "\`${IMAGE}:${VER}\` @ \`${D}\`  (signed + SLSA-attested + SBOM)"
+            echo ""
+            echo "In the PRIVATE repo's \`catalog/distros.yaml\` (\`managed\` distro):"
+            echo '```yaml'
+            echo "    versions: [ …, \"${VER}\" ]"
+            echo "    digests:"
+            echo "      \"${VER}\": ${D}"
+            echo '```'
+            echo ""
+            echo "First publish only: make the ghcr package PUBLIC (unauthenticated pull)."
+          } >> "$GITHUB_STEP_SUMMARY"
