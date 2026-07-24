@@ -9,8 +9,13 @@
 # Per-version: the OCB manifest is version-locked, so `version` (re)builds a snapshotted version from
 # versions/<ver>/manifest.yaml; empty builds the current root manifest.yaml.
 #
+# SPEED: each arch builds on its NATIVE runner (amd64 on x64, arm64 on ubuntu-24.04-arm) — NO QEMU.
+# Emulating an arm64 compile of the 54-component collector took ~1h+; native arm64 is minutes. The two
+# per-arch images push BY DIGEST (no tag); the `merge` job assembles the multi-arch tag and does the
+# single sign/attest/SBOM on the published image (the free arm64 runners are GA for public repos).
+#
 # Hardening: pinned actions, least-privilege token, hardened runner, a BLOCKING govulncheck on the
-# built binary, and a signed (cosign) + attested (SLSA) + SBOM'd multi-arch image.
+# built binary (per arch), and a signed (cosign) + attested (SLSA) + SBOM'd multi-arch image.
 name: release
 
 on:
@@ -34,13 +39,25 @@ env:
   IMAGE: ghcr.io/ollystack/otelcol
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  # Per-arch build on a NATIVE runner — no QEMU. Each leg builds + govulncheck-gates its own arch's
+  # binary, then pushes the single-arch image BY DIGEST (no tag). `merge` stitches the tag together.
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write       # push the image to ghcr.io/ollystack (same org, via GITHUB_TOKEN)
-      id-token: write       # keyless cosign + SLSA provenance (Sigstore OIDC)
-      attestations: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
@@ -50,7 +67,6 @@ jobs:
         with:
           go-version: "1.26.5"   # filterprocessor linker bug (needs 1.26+) + GO-2026-5856
           check-latest: true
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Resolve the manifest + version
@@ -68,7 +84,7 @@ jobs:
           fi
           VER="$(grep -m1 'otelcol_version:' manifest.yaml | awk '{print $2}' | tr -d '\"')"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "managed-otelcol v${VER}"
+          echo "managed-otelcol v${VER} (${{ matrix.platform }})"
 
       - name: No floating gomod versions
         run: |
@@ -76,7 +92,7 @@ jobs:
             echo "::error::floating gomod version in manifest.yaml"; exit 1
           fi
 
-      - name: Build the managed collector (OCB) — the govulncheck subject
+      - name: Build the managed collector (OCB) — the govulncheck subject (native ${{ matrix.arch }})
         env:
           CGO_ENABLED: "0"
         run: |
@@ -117,43 +133,98 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}   # same-org packages:write — no PAT
 
-      - name: Build + push the image (linux/amd64, arm64)
+      - name: Build + push by digest (${{ matrix.platform }}, native — no QEMU)
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform }}
           build-args: |
             OTELCOL_VERSION=${{ steps.v.outputs.version }}
-          tags: ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
-          provenance: false   # attached explicitly below
+          # Push the single-arch image by digest only (no tag) — the merge job creates the tag.
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          d="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${d#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the multi-arch tag from the two per-arch digests, then sign / attest / SBOM the ONE
+  # published multi-arch image and print the digest to record in the private repo's `managed` distro.
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write       # create the multi-arch tag
+      id-token: write       # keyless cosign + SLSA provenance (Sigstore OIDC)
+      attestations: write
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Create the multi-arch manifest + capture the index digest
+        id: merge
+        run: |
+          VER="${{ needs.build.outputs.version }}"
+          cd /tmp/digests
+          # Each file is named for its per-arch digest (sha256 hex, no prefix); stitch them into the tag.
+          srcs=()
+          for f in *; do srcs+=("${IMAGE}@sha256:${f}"); done
+          docker buildx imagetools create -t "${IMAGE}:${VER}" "${srcs[@]}"
+          DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${VER}" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "published ${IMAGE}:${VER} @ ${DIGEST}"
 
       - name: SLSA build-provenance for the image
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
           push-to-registry: true
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
       - name: Keyless-sign the image (Sigstore)
         env:
           COSIGN_YES: "true"
-        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+        run: cosign sign --yes "${IMAGE}@${{ steps.merge.outputs.digest }}"
 
       - name: SBOM (SPDX) for the image
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+          image: ${{ env.IMAGE }}:${{ steps.merge.outputs.version }}
           format: spdx-json
-          output-file: managed-otelcol-${{ steps.v.outputs.version }}.sbom.spdx.json
+          output-file: managed-otelcol-${{ steps.merge.outputs.version }}.sbom.spdx.json
           upload-artifact: true
 
       - name: Record — version + digest for the private repo's `managed` distro
         run: |
-          VER="${{ steps.v.outputs.version }}"; D="${{ steps.build.outputs.digest }}"
+          VER="${{ steps.merge.outputs.version }}"; D="${{ steps.merge.outputs.digest }}"
           {
             echo "## Published \`${IMAGE}:${VER}\`"
             echo ""
