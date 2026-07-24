@@ -2,7 +2,7 @@
 # Stage 1 compiles the curated distribution with OCB (so the binary matches the build
 # platform's OS/arch — no stale host binary), stage 2 is a minimal runtime.
 #
-#   docker build -t managed-otelcol:0.155.0 .   (context = this repo root)
+#   docker build -t managed-otelcol:0.157.0 .   (context = this repo root)
 #
 # Pins: otelcol_version is passed as a build-arg (must match manifest.yaml's otelcol_version).
 # Go 1.26.5 REQUIRED: filterprocessor hits a generics linker bug on go 1.23–1.25 (fixed in 1.26), and
@@ -10,7 +10,7 @@
 # this. Building on golang:1.25 fails to link; on 1.26.4 fails the vuln scan.
 
 FROM golang:1.26.5-bookworm AS build
-ARG OTELCOL_VERSION=0.155.0
+ARG OTELCOL_VERSION=0.157.0
 ENV CGO_ENABLED=0
 WORKDIR /src
 RUN go install go.opentelemetry.io/collector/cmd/builder@v${OTELCOL_VERSION}

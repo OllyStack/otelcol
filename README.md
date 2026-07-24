@@ -35,7 +35,7 @@ version to rebuild it). It pushes `ghcr.io/ollystack/otelcol:<ver>` and prints t
 ## Verifying an image
 
 ```sh
-IMG=ghcr.io/ollystack/otelcol:0.155.0
+IMG=ghcr.io/ollystack/otelcol:0.157.0
 # provenance (who/what/where built it)
 gh attestation verify oci://$IMG --owner OllyStack
 # keyless signature (Sigstore)
