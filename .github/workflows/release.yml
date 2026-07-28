@@ -27,11 +27,21 @@ on:
         default: ""
   push:
     branches: [main]
+    # ONLY things that change what the CURRENT image contains. An automatic push build always builds
+    # the ROOT manifest.yaml, so any path here that isn't the current image's content re-publishes the
+    # current tag with a new digest — silently invalidating the digest the private catalog pins for it
+    # (catalog/distros.yaml `digests:`), which is the pin bundles render as `image@sha256:...`.
+    #
+    # Deliberately NOT triggers:
+    #   versions/**   — a historical snapshot. Vendoring versions/0.156.0/manifest.yaml rebuilt and
+    #                   re-pushed 0.157.0, which is how this was found. Those exist to be built on
+    #                   demand: `gh workflow run release.yml -f version=0.156.0`.
+    #   this workflow — a CI edit is not an image-content change. If one warrants a rebuild, dispatch
+    #                   it; that keeps every workflow tweak from minting a new digest for a shipped
+    #                   tag (and from needing [skip ci] to avoid it).
     paths:
       - "manifest.yaml"
-      - "versions/**"
       - "Dockerfile"
-      - ".github/workflows/release.yml"
 
 permissions: {}
 
@@ -85,6 +95,25 @@ jobs:
           VER="$(grep -m1 'otelcol_version:' manifest.yaml | awk '{print $2}' | tr -d '\"')"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "managed-otelcol v${VER} (${{ matrix.platform }})"
+
+      # Republishing a tag is legitimate (a Dockerfile/dependency security rebuild) but must never be
+      # a surprise: the new digest invalidates the pin the private catalog records for that version,
+      # and its managed-image-sync will (correctly) refuse to auto-update and raise a conflict for a
+      # human. Surface it here, at the source, rather than letting it turn up downstream. Warn, don't
+      # block — an intentional rebuild is a real use case.
+      - name: Note if this republishes an existing tag
+        run: |
+          VER="${{ steps.v.outputs.version }}"
+          TOK=$(curl -sf "https://ghcr.io/token?scope=repository:ollystack/otelcol:pull&service=ghcr.io" | jq -r .token || true)
+          DIG=$(curl -sfI -H "Authorization: Bearer $TOK" \
+                  -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json" \
+                  "https://ghcr.io/v2/ollystack/otelcol/manifests/${VER}" 2>/dev/null \
+                | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')
+          if [ -n "$DIG" ]; then
+            echo "::warning::${VER} is already published as ${DIG}. This run REPLACES that tag with a new digest — the private catalog's recorded pin for ${VER} will no longer match and its managed-image-sync will flag a conflict for review."
+          else
+            echo "${VER} is not yet published — this is a first publish."
+          fi
 
       - name: No floating gomod versions
         run: |
