@@ -67,3 +67,20 @@ extensions:
 providers:
 - gomod: go.opentelemetry.io/collector/confmap/provider/envprovider v1.61.0
 - gomod: go.opentelemetry.io/collector/confmap/provider/fileprovider v1.61.0
+
+# SECURITY REBUILD (2026-07-28). Go MVS resolves the MINIMUM version satisfying the pinned component
+# set, so rebuilding this manifest re-links exactly the transitive deps it originally shipped with —
+# verified: a plain rebuild reproduced grpc v1.81.1 / x/text v0.38.0 / compress v1.18.6, the same
+# vulnerable versions found in the published image. These pin the fixed releases explicitly.
+#
+#   GO-2026-6061  grpc     v1.81.1 -> v1.82.1  (transport.ClientStream.Read, the gRPC OTLP path)
+#   GO-2026-5970  x/text   v0.38.0 -> v0.39.0  (infinite loop on invalid input)
+#   GO-2026-5841  compress v1.18.6 -> v1.18.7
+#
+# All three were symbol-reachable in the shipped binary. Only THIS version needs them: 0.157.0's
+# components already require higher minimums. Verified locally — OCB builds clean and govulncheck
+# reports only allowlisted findings.
+replaces:
+  - google.golang.org/grpc => google.golang.org/grpc v1.82.1
+  - golang.org/x/text => golang.org/x/text v0.39.0
+  - github.com/klauspost/compress => github.com/klauspost/compress v1.18.7
