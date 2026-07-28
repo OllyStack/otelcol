@@ -1,0 +1,149 @@
+# Re-scan the PUBLISHED images for vulnerabilities disclosed since they were built.
+#
+# release.yml gates on govulncheck at BUILD time. That says nothing about tomorrow: a tag that was
+# clean when it shipped is not clean forever, and nothing was looking at published images afterwards.
+# Found the hard way — ghcr.io/ollystack/otelcol:0.155.0, built 9 July and still in the supported
+# window, links three fixable, symbol-reachable vulnerabilities disclosed after that date:
+#
+#   GO-2026-6061  google.golang.org/grpc      v1.81.1  -> fixed in v1.82.1  (transport.ClientStream.Read)
+#   GO-2026-5970  golang.org/x/text           v0.38.0  -> fixed in v0.39.0
+#   GO-2026-5841  github.com/klauspost/compress v1.18.6 -> fixed in v1.18.7
+#
+# It would fail its own build gate today, and a fleet could pin it. This closes that blind spot: scan
+# what is PUBLISHED, on a schedule, with the same allowlist the build gate uses.
+#
+# Scans the shipped artifact itself — pulls each tag, extracts /usr/bin/managed-otelcol, and runs
+# `govulncheck -mode=binary` on it. Not a rebuild, not a manifest inspection: the actual bytes a
+# client runs. A finding opens (or updates) ONE issue listing every affected tag, so a lingering
+# vulnerability doesn't spawn a new issue daily.
+name: rescan
+
+on:
+  schedule:
+    - cron: "0 6 * * *"        # daily, before the private catalog's managed-image-sync at 08:00
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: "Optional: space-separated tags to scan (e.g. '0.155.0 0.157.0'). Empty = every published version tag."
+        required: false
+        default: ""
+
+permissions: {}
+
+env:
+  IMAGE: ghcr.io/ollystack/otelcol
+  # Same accepted set as release.yml's build gate. Keep them in step: a finding accepted at build
+  # time must not reappear as a daily alert, and one REVOKED here must also start failing builds.
+  #   GO-2022-0635 / GO-2022-0646 — aws-sdk-go v1 s3crypto (AWS deprecated the client, no fix)
+  #   GO-2026-5932               — golang.org/x/crypto/openpgp (upstream-deprecated, unmaintained)
+  ALLOW: "GO-2022-0635 GO-2022-0646 GO-2026-5932"
+
+jobs:
+  rescan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+      issues: write            # file/refresh the finding
+    steps:
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.26.5"
+          check-latest: true
+
+      # Which tags exist. Defaults to every published semver tag rather than a hand-kept list — the
+      # point of this job is to cover what is ACTUALLY out there, including versions someone forgot.
+      - id: tags
+        run: |
+          IN="${{ github.event.inputs.tags }}"
+          if [ -n "$IN" ]; then
+            echo "list=$IN" >> "$GITHUB_OUTPUT"; echo "scanning requested: $IN"; exit 0
+          fi
+          TOK=$(curl -sf "https://ghcr.io/token?scope=repository:ollystack/otelcol:pull&service=ghcr.io" | jq -r .token)
+          LIST=$(curl -sf -H "Authorization: Bearer $TOK" "https://ghcr.io/v2/ollystack/otelcol/tags/list" \
+                 | jq -r '.tags[]?' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "published version tags: $LIST"
+
+      - name: Scan every published image
+        id: scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GV="$(go env GOPATH)/bin/govulncheck"
+          REPORT=""; AFFECTED=""
+          for TAG in ${{ steps.tags.outputs.list }}; do
+            echo "::group::$TAG"
+            # Extract the shipped binary — scan the artifact clients run, not a reproduction of it.
+            docker pull -q "$IMAGE:$TAG" >/dev/null
+            CID=$(docker create "$IMAGE:$TAG")
+            docker cp "$CID:/usr/bin/managed-otelcol" "./bin-$TAG" >/dev/null
+            docker rm -f "$CID" >/dev/null
+            set +e
+            OUT="$("$GV" -mode=binary "./bin-$TAG" 2>&1)"; rc=$?
+            set -e
+            if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+              echo "::error::govulncheck errored on $TAG (exit $rc)"; echo "$OUT"; exit 1
+            fi
+            BAD=""
+            for id in $(printf '%s\n' "$OUT" | grep -oE 'GO-[0-9]{4}-[0-9]+' | sort -u); do
+              case " $ALLOW " in
+                *" $id "*) ;;
+                *) BAD="$BAD $id"
+                   DETAIL=$(printf '%s\n' "$OUT" | grep -A6 "Vulnerability #.*: $id" \
+                            | grep -E 'Module:|Found in:|Fixed in:' | tr -s ' ' | paste -sd' ' -)
+                   REPORT="${REPORT}
+          - \`$TAG\` — **$id** $DETAIL" ;;
+              esac
+            done
+            rm -f "./bin-$TAG"
+            if [ -n "$BAD" ]; then echo "$TAG:$BAD"; AFFECTED="$AFFECTED $TAG"; else echo "$TAG: clean (allowlisted only)"; fi
+            echo "::endgroup::"
+          done
+          {
+            echo "affected=$AFFECTED"
+            echo "report<<EOF"
+            echo "$REPORT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # One issue, refreshed — not one per day. Closed automatically when everything is clean again,
+      # so the issue's state IS the current answer rather than a log of past alarms.
+      - name: File or refresh the finding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="Published images affected by vulnerabilities disclosed after build"
+          NUM=$(gh issue list --state all --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -z "${{ steps.scan.outputs.affected }}" ]; then
+            if [ -n "$NUM" ]; then
+              gh issue comment "$NUM" --body "All published images are clean again as of $(date -u +%Y-%m-%dT%H:%MZ) — closing."
+              gh issue close "$NUM" 2>/dev/null || true
+            fi
+            echo "all published images clean"; exit 0
+          fi
+          BODY="These **already-published** tags link vulnerabilities that were disclosed after they
+          were built, so they passed the build gate and would fail it today. Scanned from the shipped
+          binary (\`govulncheck -mode=binary\` on \`/usr/bin/managed-otelcol\`), same allowlist as
+          release.yml.
+          ${{ steps.scan.outputs.report }}
+
+          **Rebuild** a tag to pick up fixed transitive deps:
+          \`gh workflow run release.yml -f version=<tag>\`
+          Note that Go MVS resolves the MINIMUM version satisfying the manifest, so a plain rebuild
+          only helps if the fixed dependency is already required transitively; otherwise the manifest
+          needs an explicit bump. Republishing replaces the tag's digest — the private catalog's
+          managed-image-sync will flag the change as a conflict for deliberate re-recording.
+
+          _Refreshed automatically by rescan.yml; closes itself when every tag is clean._"
+          if [ -n "$NUM" ]; then
+            gh issue reopen "$NUM" 2>/dev/null || true
+            gh issue edit "$NUM" --body "$BODY"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
+          echo "::error::affected published tags:${{ steps.scan.outputs.affected }}"
+          exit 1
