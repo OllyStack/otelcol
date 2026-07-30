@@ -171,6 +171,26 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             OTELCOL_VERSION=${{ steps.v.outputs.version }}
+          # OCI provenance, so an image can answer "where did you come from" WITHOUT a workflow-log
+          # archaeology session. This was learned the expensive way: when the 0.155.0 tag was
+          # re-pushed by the security rebuild, the private catalog's pin check flagged the digest
+          # change correctly — and establishing *why* it moved meant listing runs, opening logs and
+          # diffing `components` between two pulled images, because the image itself carried nothing.
+          # `revision` alone would have gone straight to the commit, whose message says exactly what
+          # changed and why.
+          #
+          # `created` is deliberately NOT here: the image config already carries a creation
+          # timestamp, so a label would add a second moving value and no new information.
+          # No `licenses` either — this repo has no LICENSE file, and a label asserting one would be
+          # a false claim about how the artifact may be used.
+          labels: |
+            org.opencontainers.image.title=managed-otelcol
+            org.opencontainers.image.description=Curated, hardened OpenTelemetry Collector distribution for OllyStack managed fleets
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+            com.ollystack.build.run-url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Push the single-arch image by digest only (no tag) — the merge job creates the tag.
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           provenance: false
