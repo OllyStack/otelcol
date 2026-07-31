@@ -55,3 +55,7 @@ Use it, modify it, rebuild it, run it in production, indefinitely. There is no o
 through OllyStack, and nothing here phones home. The `NOTICE` file records upstream attribution and
 the one thing the licence does not grant: trademark rights in the OllyStack name and mark (Apache-2.0
 §6), so a rebuild should carry your own name.
+
+Delivering client work with this? [`USING-OLLYSTACK.md`](USING-OLLYSTACK.md) covers what you can do
+without asking (nearly everything), what attribution is asked for and why it helps your client, and
+where the trademark line sits.
