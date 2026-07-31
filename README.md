@@ -46,3 +46,12 @@ cosign verify $IMG \
 
 > The **component set** (what this build can run) is `manifest.yaml`; the **pipeline config** (what a
 > given fleet runs) is delivered separately by the portal (GitOps / OpAMP). Design once, run anywhere.
+
+## License
+
+[Apache-2.0](LICENSE) — same license as the upstream OpenTelemetry components this is built from.
+
+Use it, modify it, rebuild it, run it in production, indefinitely. There is no obligation to run it
+through OllyStack, and nothing here phones home. The `NOTICE` file records upstream attribution and
+the one thing the licence does not grant: trademark rights in the OllyStack name and mark (Apache-2.0
+§6), so a rebuild should carry your own name.
