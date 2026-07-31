@@ -1,0 +1,22 @@
+OllyStack managed OpenTelemetry Collector
+Copyright 2026 Madhukar Beema
+
+This product includes software developed by The OpenTelemetry Authors
+(https://github.com/open-telemetry), licensed under the Apache License,
+Version 2.0.
+
+This distribution is an OpenTelemetry Collector Builder (OCB) build. The
+components it contains are declared in manifest.yaml and are obtained from
+the upstream opentelemetry-collector and opentelemetry-collector-contrib
+repositories, each under its own license (Apache-2.0 upstream). Their
+copyright notices and licenses are unchanged and are carried in the
+respective module source and in the SBOM published with every image.
+
+OllyStack is an independent project. OpenTelemetry and OTel are trademarks
+of The Linux Foundation; this project is not affiliated with or endorsed by
+the OpenTelemetry project or the Linux Foundation.
+
+The OllyStack name and logo are trademarks of the copyright holder. The
+Apache License, Version 2.0 grants no trademark rights (see section 6) —
+you may use, modify and redistribute this software, including rebuilding
+the image, but not under the OllyStack name or mark.
