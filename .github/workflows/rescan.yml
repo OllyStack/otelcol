@@ -45,10 +45,20 @@ jobs:
       contents: read
       packages: read
       issues: write            # file/refresh the finding
+      actions: write           # re-arm this schedule (see "Keep the schedule alive")
     steps:
       - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2
         with:
           egress-policy: audit
+      # GitHub disables a scheduled workflow after 60 days with no repository activity, and a
+      # scheduled run does not count as activity. That is exactly how this scan went dark once: the
+      # repo was quiet because nothing needed changing, so the one job watching it stopped. Enabling
+      # the workflow through the API restarts the 60-day clock, so every run re-arms the next one.
+      # First, so it happens even on a run whose scan fails.
+      - name: Keep the schedule alive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/rescan.yml/enable"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -147,3 +157,27 @@ jobs:
           fi
           echo "::error::affected published tags:${{ steps.scan.outputs.affected }}"
           exit 1
+
+      # A finding files an issue above. A scan that could not RUN (registry down, govulncheck broken,
+      # a tag that will not pull) used to end in a red run and nothing else — and a red scheduled run
+      # is easy to miss for weeks. It gets its own issue, closed by the next run that completes.
+      - name: Report a scan that could not run
+        if: failure() && steps.scan.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="rescan could not complete"
+          NUM=$(gh issue list --state all --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          BODY="The scheduled vulnerability re-scan of the published images did not finish, so nothing is
+          currently checking them. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          _Filed by rescan.yml; closed by the next run that completes._"
+          if [ -n "$NUM" ]; then gh issue reopen "$NUM" 2>/dev/null || true; gh issue edit "$NUM" --body "$BODY"
+          else gh issue create --title "$TITLE" --body "$BODY"; fi
+      - name: Close the could-not-run issue
+        if: success() || steps.scan.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NUM=$(gh issue list --state open --search "rescan could not complete in:title" --json number --jq '.[0].number // empty')
+          [ -z "$NUM" ] || { gh issue comment "$NUM" --body "Scan completed $(date -u +%Y-%m-%dT%H:%MZ) — closing."; gh issue close "$NUM"; }
