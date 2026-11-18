@@ -80,7 +80,16 @@ providers:
 # All three were symbol-reachable in the shipped binary. Only THIS version needs them: 0.157.0's
 # components already require higher minimums. Verified locally — OCB builds clean and govulncheck
 # reports only allowlisted findings.
+#
+# SECOND SECURITY REBUILD (2026-11-18), found by the re-enabled rescan: 16 more fixable advisories
+# disclosed since July (x/net x7, grpc x3, x/crypto x3, compress, x/text, cilium/ebpf). Pins match
+# 0.157.0's (#5) plus cilium/ebpf v0.21.0 -> v0.22.0 (GO-2026-6238). x/text and x/crypto are NOT
+# pinned: with these bumps the build already requires x/text v0.43.0 and x/crypto v0.58.0, so the
+# July x/text => v0.39.0 pin had become a DOWNGRADE, and pinning x/crypto would be one too. Check
+# `go version -m` for "dep X vA => X vB" with B < A before adding any pin. Built on Go 1.26.11
+# (linux/amd64); govulncheck reports only the allowlisted three.
 replaces:
-  - google.golang.org/grpc => google.golang.org/grpc v1.82.1
-  - golang.org/x/text => golang.org/x/text v0.39.0
-  - github.com/klauspost/compress => github.com/klauspost/compress v1.18.7
+  - golang.org/x/net => golang.org/x/net v0.62.0
+  - google.golang.org/grpc => google.golang.org/grpc v1.83.2
+  - github.com/klauspost/compress => github.com/klauspost/compress v1.20.2
+  - github.com/cilium/ebpf => github.com/cilium/ebpf v0.22.0
