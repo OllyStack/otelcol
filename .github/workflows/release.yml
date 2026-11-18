@@ -75,7 +75,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: "1.26.5"   # filterprocessor linker bug (needs 1.26+) + GO-2026-5856
+          go-version: "1.26.11"   # filterprocessor linker bug (needs 1.26+) + GO-2026-5856
           check-latest: true
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 

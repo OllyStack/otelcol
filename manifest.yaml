@@ -82,3 +82,20 @@ extensions:
 providers:
 - gomod: go.opentelemetry.io/collector/confmap/provider/envprovider v1.63.0
 - gomod: go.opentelemetry.io/collector/confmap/provider/fileprovider v1.63.0
+
+# SECURITY REBUILD (2026-11-18). The image built from this manifest on 2026-08-01 now links 32
+# fixable vulnerabilities disclosed since, and the release gate (govulncheck, blocking) refuses to
+# publish it. Go MVS re-resolves the SAME minimum versions on every rebuild, so a plain rebuild cannot
+# fix them (see versions/0.155.0 for the same finding); these pin the first fixed releases.
+#   x/net v0.57.0 -> v0.62.0     GO-2026-6603 6610 6611 6612 6617 6860 6866
+#   grpc v1.82.1 -> v1.83.2      GO-2026-6348 6441 6443
+#   compress v1.19.0 -> v1.20.2  GO-2026-6865
+# x/crypto (GO-2026-6303 6354 6355) and x/text (GO-2026-6629) need NO pin: the bumps above raise them
+# to v0.58.0 and v0.43.0, past their fixes. Pinning them to the first fixed release would DOWNGRADE
+# both — checked by reading the built binary's module list (`go version -m`), not assumed.
+# The standard-library findings (net/http, crypto/tls, crypto/x509, …) are fixed by Go 1.26.11 in
+# the Dockerfile, not here.
+replaces:
+  - golang.org/x/net => golang.org/x/net v0.62.0
+  - google.golang.org/grpc => google.golang.org/grpc v1.83.2
+  - github.com/klauspost/compress => github.com/klauspost/compress v1.20.2
