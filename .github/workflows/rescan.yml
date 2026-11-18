@@ -122,13 +122,18 @@ jobs:
 
       # One issue, refreshed — not one per day. Closed automatically when everything is clean again,
       # so the issue's state IS the current answer rather than a log of past alarms.
+      # The report goes in through env, never pasted into the script with ${{ }}: its lines quote tags
+      # in backticks, which the shell ran as commands (`0.155.0: command not found`, exit 127) — so a
+      # real finding crashed this step and no issue was ever filed.
       - name: File or refresh the finding
         env:
           GH_TOKEN: ${{ github.token }}
+          AFFECTED: ${{ steps.scan.outputs.affected }}
+          REPORT: ${{ steps.scan.outputs.report }}
         run: |
           TITLE="Published images affected by vulnerabilities disclosed after build"
           NUM=$(gh issue list --state all --search "$TITLE in:title" --json number --jq '.[0].number // empty')
-          if [ -z "${{ steps.scan.outputs.affected }}" ]; then
+          if [ -z "$AFFECTED" ]; then
             if [ -n "$NUM" ]; then
               gh issue comment "$NUM" --body "All published images are clean again as of $(date -u +%Y-%m-%dT%H:%MZ) — closing."
               gh issue close "$NUM" 2>/dev/null || true
@@ -139,7 +144,7 @@ jobs:
           were built, so they passed the build gate and would fail it today. Scanned from the shipped
           binary (\`govulncheck -mode=binary\` on \`/usr/bin/managed-otelcol\`), same allowlist as
           release.yml.
-          ${{ steps.scan.outputs.report }}
+          ${REPORT}
 
           **Rebuild** a tag to pick up fixed transitive deps:
           \`gh workflow run release.yml -f version=<tag>\`
@@ -155,7 +160,7 @@ jobs:
           else
             gh issue create --title "$TITLE" --body "$BODY"
           fi
-          echo "::error::affected published tags:${{ steps.scan.outputs.affected }}"
+          echo "::error::affected published tags:$AFFECTED"
           exit 1
 
       # A finding files an issue above. A scan that could not RUN (registry down, govulncheck broken,
